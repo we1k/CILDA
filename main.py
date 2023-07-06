@@ -20,9 +20,6 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 import transformers
-from transformers import (
-    SchedulerType,
-)
 
 # from src.model import CILDA
 from src.Args import parse_args
@@ -42,11 +39,17 @@ def main():
     transformers.utils.logging.set_verbosity_info()
     args = parse_args()
     cil_model = CILDA(args)
+    # First do training on the teacher using full dataset
     # cil_model.train_teacher(train_epochs=args.teacher_num_train_epochs)
-    # cil_model.eval_on_clf(cil_model.Teacher)
+    
+    # train the generator using few-shot dataset
     # cil_model.train_generator(train_epochs=args.generator_num_train_epochs) 
-    cil_model.generate_synthetic_data()
-    # cil_model.train_student(train_epochs=args.student_num_train_epochs)
+    
+    # generate synthetic data
+    # cil_model.generate_synthetic_data(syn_data_output_path='data/syn_data.json')
+    
+    # train student using generate_synthetic and few-shot data 
+    cil_model.train_student(train_epochs=args.student_num_train_epochs)
     
 if __name__ == '__main__':
     main()

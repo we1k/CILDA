@@ -46,6 +46,12 @@ def parse_args():
         action="store_true",
         help="If passed, pad all samples to `max_length`. Otherwise, dynamic padding is used.",
     )
+
+    parser.add_argument(
+        "--syn_data_path",
+        type=str,
+        default="syn_data.json",
+    )
     
     # teacher Model and student Model
     

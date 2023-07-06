@@ -59,6 +59,8 @@ class CILDA:
             
         # TODO: change MASK BERT to GPT2
         # self.Generator = GPT2LMHeadModel.from_pretrained(args.generator_model_name)
+        # from transformers import RobertaForSequenceClassification
+
         # self.G_tokenizer = GPT2Tokenizer.from_pretrained(args.generator_model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(args.teacher_model_name)
         if args.generator_checkpoint_path is not None:
@@ -68,15 +70,15 @@ class CILDA:
             
         self.num_labels = self.task_num_labels[args.task_name]
 
-        # self.S_config = AutoConfig.from_pretrained(args.student_model_name, num_labels=self.num_labels)
-        # self.Student = AutoModelForSequenceClassification.from_pretrained(args.student_model_name, config=self.S_config).to(self.device)
+        self.S_config = AutoConfig.from_pretrained(args.student_model_name, num_labels=self.num_labels)
+        self.Student = AutoModelForSequenceClassification.from_pretrained(args.student_model_name, config=self.S_config).to(self.device)
 
-        # if args.teacher_checkpoint_path is not None:
-        #     logger.info(f"loading teacher weight from {args.teacher_checkpoint_path}") 
-        #     self.Teacher = AutoModelForSequenceClassification.from_pretrained(args.teacher_checkpoint_path).to(self.device) 
-        # else:
-        #     self.T_config = AutoConfig.from_pretrained(args.teacher_model_name, num_labels=self.num_labels)
-        #     self.Teacher = AutoModelForSequenceClassification.from_pretrained(args.teacher_model_name, config=self.T_config).to(self.device)
+        if args.teacher_checkpoint_path is not None:
+            logger.info(f"loading teacher weight from {args.teacher_checkpoint_path}") 
+            self.Teacher = AutoModelForSequenceClassification.from_pretrained(args.teacher_checkpoint_path).to(self.device) 
+        else:
+            self.T_config = AutoConfig.from_pretrained(args.teacher_model_name, num_labels=self.num_labels)
+            self.Teacher = AutoModelForSequenceClassification.from_pretrained(args.teacher_model_name, config=self.T_config).to(self.device)
 
         
         # self.t_proj = nn.Linear(self.Teacher.config.intermediate_size, args.intermediate_hidden_size)
@@ -145,7 +147,7 @@ class CILDA:
        
         metric = evaluate.load('glue', self.args.task_name)
         
-        train_dataloader = self.data_dict['few-shot']
+        train_dataloader = self.data_dict['full']
         eval_dataloader = self.data_dict['eval']
 
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -219,7 +221,6 @@ class CILDA:
                 references=references,
             )
         eval_metric = metric.compute()
-        logger.info(f'test results: {eval_metric}')
         return eval_metric
 
     def train_generator(self, train_epochs):
@@ -305,12 +306,13 @@ class CILDA:
         generator_save_path = os.path.join(self.args.output_dir, 'generator')
         generator.save_pretrained(generator_save_path)
     
-    def generate_synthetic_data(self):
+    def generate_synthetic_data(self, syn_data_output_path):
         generator = self.Generator
         generator.eval()
 
         all_synthetic_data = []
-        constractive_label = []
+        all_real_data = []
+        real_label = []
         with torch.no_grad():
             for i, batch in enumerate(tqdm(self.data_dict['few-shot'])):
                 batch = {k : batch[k].to(self.device) for k in batch}
@@ -340,45 +342,67 @@ class CILDA:
                     logger.info("*"*10)
                 
                 
-                
-
+                all_real_data.append(batch['input_ids']) 
                 all_synthetic_data.append(batch['synthetic_input_ids'])
-                false_label = (torch.ones_like(batch['clf_labels'], device=self.device) * (self.num_labels-1) - batch['clf_labels'])
-                constractive_label.append(false_label)
+                real_label.append(batch['clf_labels']) 
         
-        ### save synthetic data to files 
-
-        # with open(f"./synthetic_data.csv", 'w', newline='') as f:
-        #     writer = csv.writer(f)
-        #     writer.writerows(all_synthetic_data)
-        # with open("synthetic_data.json", 'w') as jsonfile:
-        #     json.dump(self.tokenizer.batch_decode(all_synthetic_data, skip_special_tokens=True), jsonfile)
-           
         # combine all data
-        all_synthetic_data = torch.stack(all_synthetic_data, dim=0).to(self.device)
-        constractive_label = torch.stack(constractive_label, dim=0).to(self.device)
-        attn_mask = torch.ones_like(synthetic_data).to(self.device)
-        augmented_dataset = {
-            'input_ids': synthetic_data,
-            'attention_mask': attn_mask,
-            'clf_labels' : constractive_label
-        }
-        data_collator = DataCollatorWithPadding(tokenizer=self.tokenizer, pad_to_multiple_of=8)
-        self.data_dict['aug'] = DataLoader(synthetic_data, collate_fn=data_collator, batch_size=self.args.batch_size)
+        all_synthetic_data = torch.cat(all_synthetic_data, dim=0).to(self.device)
+        all_real_data = torch.cat(all_real_data, dim=0).to(self.device)
+        real_label = torch.cat(real_label, dim=0).to(self.device)
+        
+        real_text      = self.tokenizer.batch_decode(all_real_data, skip_special_tokens=True)
+        synthetic_text = self.tokenizer.batch_decode(all_synthetic_data, skip_special_tokens=True)
+        real_label = real_label.detach().cpu().numpy().tolist()
+        augmented_dataset = [
+                {"ori_text":text, "syn_text": syn_text, "label":label} \
+                for text, syn_text, label in zip(real_text, synthetic_text, real_label)
+            ]
+        
+        # write constructed data into json file
+        with open(syn_data_output_path, 'w') as jsonfile:
+            json.dump(augmented_dataset, jsonfile)
     
+    def get_synthetic_dataset(self):
+        args = self.args
+        tokenizer = self.tokenizer
+        max_length = args.max_length
+        
+        file_path = os.path.join('data', args.syn_data_path)
+        raw_datasets = load_dataset('json',data_files=file_path)
+
+        def preproces_fn(examples):
+            inputs = tokenizer(examples['ori_text'], padding='max_length', max_length=max_length, truncation=True)
+            syn_input = tokenizer(examples['syn_text'], padding='max_length', max_length=max_length, truncation=True).input_ids
+
+            inputs['syn_input_ids'] = syn_input
+            inputs['labels'] = examples['label']
+            return inputs
+
+        process_ds = raw_datasets.map(preproces_fn, batched=True)
+        process_ds.remove_columns(column_names=raw_datasets['train'].column_names)
+        process_ds.set_format('torch', columns=['input_ids', 'attention_mask', 'labels', 'syn_input_ids'])
+
+        data_collator = DataCollatorWithPadding(tokenizer, padding=True,pad_to_multiple_of=8)
+        dataloader = DataLoader(process_ds['train'], collate_fn=data_collator, batch_size=args.batch_size)
+        self.data_dict['synthetic'] = dataloader
+        return 
+                
     def train_student(self, train_epochs):
+        args = self.args
+        
         generator = self.Generator
         teacher = self.Teacher
         student = self.Student
         teacher.eval()
         generator.eval()
         
-        args = self.args
         s_optimizer = self.get_optimizer('student')
         
-        metric = evaluate.load('glue', self.args.task_name)
-        
-        train_dataloader = self.data_dict['few-shot']
+        if 'synthetic' not in self.data_dict:
+            self.get_synthetic_dataset()
+            
+        train_dataloader = self.data_dict['synthetic']
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
         
         max_train_steps = args.max_train_steps
@@ -392,10 +416,8 @@ class CILDA:
         for epoch in range(train_epochs):
             logger.info("training on student")
             student.train()
-            for i, batch in enumerate(tqdm(self.data_dict['few-shot'])): 
+            for i, batch in enumerate(tqdm(train_dataloader)): 
                 batch = {k : batch[k].to(self.device) for k in batch}
-                batch_size = batch['input_ids'].shape[0]
-                seq_len = batch['input_ids'].shape[1]
                 
                 # few-shot dataset
                 real_teacher_logits = teacher(
@@ -403,18 +425,37 @@ class CILDA:
                 ).logits
                 real_student_output = student(
                     input_ids=batch['input_ids'],
-                    labels=batch['clf_labels'],
+                    labels=batch['labels'],
                 )
+                
+                # syn_data training
+                syn_teacher_logits = teacher(
+                    input_ids=batch['syn_input_ids'],
+                ).logits
+                syn_student_logits = student(
+                    input_ids=batch['syn_input_ids'],
+                ).logits
+                
                 real_student_logits = real_student_output.logits
                 
-                # loss = torch.nn.KLDivLoss()(syn_teacher_logits, syn_student_logits) + torch.nn.KLDivLoss()(real_teacher_logits, real_student_logits) 
+                real_t_pred = F.log_softmax(real_teacher_logits, dim=1)
+                real_s_pred = F.log_softmax(real_student_logits, dim=1)
                 
-                loss += real_student_output.loss
+                syn_t_pred = F.log_softmax(syn_teacher_logits, dim=1)
+                syn_s_pred = F.log_softmax(syn_student_logits, dim=1)
+                
+                loss = F.kl_div(real_s_pred, real_t_pred, reduction='batchmean', log_target=True) + F.kl_div(syn_s_pred, syn_t_pred, reduction='batchmean', log_target=True)
+                # print(F.kl_div(real_s_pred, real_t_pred, reduction='batchmean', log_target=True).item(), 
+                #      F.kl_div(syn_s_pred, syn_t_pred, reduction='batchmean', log_target=True).item(),
+                #      real_student_output.loss.item()) 
+                loss = (loss + real_student_output.loss) / 3
+                logger.info(f"loss : {loss.item()}")
                 loss.backward()
                 s_optimizer.step()
                 s_optimizer.zero_grad()
 
-                # eval on student
+            # eval on student
+            if epoch % 10 == 0:
                 student.eval()
                 eval_metric = self.eval_on_clf(student)
                 logger.info(f'test results: {eval_metric}')
