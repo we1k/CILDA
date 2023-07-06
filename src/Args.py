@@ -53,6 +53,25 @@ def parse_args():
         default="syn_data.json",
     )
     
+    
+    # Training Setting
+    
+    parser.add_argument(
+        "--do_train_teacher",
+        action='store_true', 
+    )
+    parser.add_argument(
+        "--do_train_generator",
+        action='store_true', 
+    )
+    parser.add_argument(
+        "--generate_data",
+        action='store_true', 
+    )
+    parser.add_argument(
+        "--do_train_student",
+        action='store_true', 
+    )
     # teacher Model and student Model
     
     parser.add_argument(

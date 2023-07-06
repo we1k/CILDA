@@ -1,5 +1,10 @@
 python main.py \
+    --task_name sst2 \
     --output_dir output \
+    --do_train_teacher \
+    --do_train_generator \
+    --generate_data \
+    --do_train_student \
     --teacher_checkpoint_path output/teacher_model \
     --generator_checkpoint_path output/generator \
     --teacher_num_train_epochs 100 \
